@@ -1,0 +1,42 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+
+# Python and packaging
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.spec
+
+# Runtime state and generated content
+data/*
+!data/.keep
+workspace/*
+!workspace/.keep
+logs/
+sessions/
+.agent1-test/
+.release_smoke/
+.release_smoke*/
+.tmp-approvals.json
+tmp_approvals*.json
+
+# OS files
+.DS_Store

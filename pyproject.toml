@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent1"
+version = "0.1.0"
+description = "Agent 1: fast, self-hosted AI agent with LangGraph and multi-adapter chat interfaces"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "APScheduler>=3.10.4",
+  "beautifulsoup4>=4.12.3",
+  "chromadb>=0.5.5",
+  "discord.py>=2.4.0",
+  "duckduckgo-search>=6.2.13",
+  "google-api-python-client>=2.149.0",
+  "google-auth>=2.35.0",
+  "google-auth-oauthlib>=1.2.1",
+  "fastapi>=0.115.0",
+  "httpx>=0.27.2",
+  "langchain-core>=0.3.7",
+  "langchain-openai>=0.2.2",
+  "langgraph>=0.2.35",
+  "playwright>=1.47.0",
+  "pydantic>=2.9.2",
+  "pydantic-settings>=2.5.2",
+  "python-dotenv>=1.0.1",
+  "slack_bolt>=1.21.2",
+  "python-telegram-bot>=21.6",
+  "tenacity>=9.0.0",
+  "uvicorn>=0.31.0",
+]
+
+[project.optional-dependencies]
+build = [
+  "pyinstaller>=6.9.0",
+]
+
+[project.scripts]
+agent1 = "agent1.main:run"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
