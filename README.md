@@ -262,6 +262,11 @@ Useful commands:
 - `/resume_job <job_id>`
 
 ## 3) Run Locally
+Remote one-command installer (PowerShell):
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/tyrequethompson83-dot/Agent-1/main/scripts/install-web.ps1 | iex"
+```
+
 One-command bootstrap:
 ```bash
 powershell -ExecutionPolicy Bypass -File scripts/bootstrap.ps1 -RunInit -InitStyle home
