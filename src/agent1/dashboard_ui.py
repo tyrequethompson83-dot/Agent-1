@@ -540,6 +540,8 @@ const NAV_ITEMS = [
   { id: 'debug', label: 'Debug' },
 ];
 
+window.App = window.App || {};
+
 const state = {
   view: 'chat',
   sessions: [],
