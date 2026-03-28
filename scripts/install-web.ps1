@@ -23,36 +23,33 @@ if (-not (Test-Path $target)) {
     New-Item -ItemType Directory -Path $target | Out-Null
 }
 
-$hasExistingRepo = (Test-Path $installScript)
-if (-not $hasExistingRepo) {
-    $existingEntries = Get-ChildItem -Force -LiteralPath $target
-    if ($existingEntries.Count -gt 0) {
-        throw "Install directory is not empty: $target"
+$existingEntries = Get-ChildItem -Force -LiteralPath $target
+if ($existingEntries.Count -gt 0 -and -not (Test-Path $installScript)) {
+    throw "Install directory is not empty and does not look like an Agent 1 install: $target"
+}
+
+$archiveUrl = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
+$tempRoot = Join-Path $env:TEMP ("agent1-install-" + [guid]::NewGuid().ToString("N"))
+$zipPath = Join-Path $tempRoot "agent1.zip"
+$extractRoot = Join-Path $tempRoot "extract"
+
+New-Item -ItemType Directory -Path $tempRoot | Out-Null
+New-Item -ItemType Directory -Path $extractRoot | Out-Null
+
+try {
+    Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
+    Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
+
+    $expanded = Get-ChildItem -LiteralPath $extractRoot -Directory | Select-Object -First 1
+    if (-not $expanded) {
+        throw "Archive did not contain a repository folder."
     }
 
-    $archiveUrl = "https://github.com/$Repo/archive/refs/heads/$Branch.zip"
-    $tempRoot = Join-Path $env:TEMP ("agent1-install-" + [guid]::NewGuid().ToString("N"))
-    $zipPath = Join-Path $tempRoot "agent1.zip"
-    $extractRoot = Join-Path $tempRoot "extract"
-
-    New-Item -ItemType Directory -Path $tempRoot | Out-Null
-    New-Item -ItemType Directory -Path $extractRoot | Out-Null
-
-    try {
-        Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath
-        Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
-
-        $expanded = Get-ChildItem -LiteralPath $extractRoot -Directory | Select-Object -First 1
-        if (-not $expanded) {
-            throw "Archive did not contain a repository folder."
-        }
-
-        Copy-Item -Path (Join-Path $expanded.FullName "*") -Destination $target -Recurse -Force
-    }
-    finally {
-        if (Test-Path $tempRoot) {
-            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-        }
+    Copy-Item -Path (Join-Path $expanded.FullName "*") -Destination $target -Recurse -Force
+}
+finally {
+    if (Test-Path $tempRoot) {
+        Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
