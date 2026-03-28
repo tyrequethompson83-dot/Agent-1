@@ -296,7 +296,25 @@ def run_parity_check(settings: Settings, strict: bool = False) -> tuple[int, lis
 
         local_settings = settings.model_copy(deep=True)
         local_settings.external_approvals_enabled = False
-        local_settings.approval_store_path = parity_root / "approvals_dashboard.json"
+        local_settings.data_dir = parity_root / "dashboard_data"
+        local_settings.safe_files_root = local_settings.data_dir / "safe_workspace"
+        local_settings.safe_shell_workdir = local_settings.data_dir / "safe_workspace"
+        local_settings.markdown_memory_path = local_settings.data_dir / "memory"
+        local_settings.vector_memory_path = local_settings.data_dir / "chroma"
+        local_settings.approval_store_path = local_settings.data_dir / "approvals" / "pending.json"
+        local_settings.provider_preferences_path = local_settings.data_dir / "approvals" / "provider_preferences.json"
+        local_settings.tool_policy_store_path = local_settings.data_dir / "approvals" / "tool_policy.json"
+        local_settings.app_log_path = local_settings.data_dir / "logs" / "app.log"
+        local_settings.tool_log_path = local_settings.data_dir / "logs" / "tool_calls.log"
+        local_settings.agentguard_audit_log_path = local_settings.data_dir / "logs" / "agentguard_audit.log"
+        local_settings.usage_meter_path = local_settings.data_dir / "logs" / "usage_meter.jsonl"
+        local_settings.workspace_profile_path = parity_root / "dashboard_workspace"
+        local_settings.skills_root_path = local_settings.workspace_profile_path / "skills"
+        local_settings.skills_registry_path = local_settings.skills_root_path / "registry.json"
+        local_settings.plugins_root_path = local_settings.workspace_profile_path / "plugins"
+        local_settings.plugins_registry_path = local_settings.plugins_root_path / "registry.json"
+        local_settings.session_jobs_path = local_settings.data_dir / "sessions" / "jobs.json"
+        local_settings.session_history_path = local_settings.data_dir / "sessions" / "history.jsonl"
         if local_settings.approval_store_path.exists():
             local_settings.approval_store_path.write_text("", encoding="utf-8")
 
@@ -308,9 +326,134 @@ def run_parity_check(settings: Settings, strict: bool = False) -> tuple[int, lis
             reason="dashboard parity",
         )
 
-        app = create_dashboard_app(local_settings)
+        class FakeOrchestrator:
+            def __init__(self, approval_manager: ApprovalManager):
+                self.approvals = approval_manager
+                self._prefs: dict[str, dict[str, str]] = {}
+                self._jobs: dict[str, list[dict[str, str]]] = {}
+
+            def _status(self, user_id: str) -> dict[str, str]:
+                pref = self._prefs.setdefault(str(user_id), {"provider": "custom", "model": "demo-model"})
+                return {
+                    "provider": pref["provider"],
+                    "base_url": "http://local-dashboard-test",
+                    "model": pref["model"],
+                    "has_model_override": "yes",
+                    "available_providers": "custom, openai",
+                }
+
+            def process_message(self, user_id: str, user_input: str) -> str:
+                row = {
+                    "id": f"J-{uuid4().hex[:8]}",
+                    "status": "completed",
+                    "created_ts": "1",
+                    "completed_ts": "1",
+                    "error": "",
+                    "output_preview": f"echo:{user_input}",
+                }
+                self._jobs.setdefault(str(user_id), []).insert(0, row)
+                return f"echo:{user_input}"
+
+            def list_available_providers(self) -> list[str]:
+                return ["custom", "openai"]
+
+            def get_provider_status(self, user_id: str) -> dict[str, str]:
+                return self._status(user_id)
+
+            def set_provider_for_user(self, user_id: str, provider: str) -> tuple[bool, str]:
+                self._prefs.setdefault(str(user_id), {"provider": "custom", "model": "demo-model"})["provider"] = provider
+                return True, f"Provider set to `{provider}`."
+
+            def set_model_for_user(self, user_id: str, model: str) -> tuple[bool, str]:
+                self._prefs.setdefault(str(user_id), {"provider": "custom", "model": "demo-model"})["model"] = model
+                return True, f"Model override set to `{model}`."
+
+            def clear_model_override_for_user(self, user_id: str) -> tuple[bool, str]:
+                self._prefs.setdefault(str(user_id), {"provider": "custom", "model": "demo-model"})["model"] = "demo-model"
+                return True, "Model override cleared."
+
+            def get_tool_policy_status(self, user_id: str) -> dict[str, str]:
+                _ = user_id
+                return {
+                    "profile": "balanced",
+                    "allow_tools": "demo_tool",
+                    "deny_tools": "[none]",
+                    "deny_permissions": "[none]",
+                }
+
+            def list_tool_profiles(self) -> list[str]:
+                return ["balanced", "locked"]
+
+            def usage_report(self, user_id: str) -> str:
+                _ = user_id
+                return "Usage Summary\n- LLM calls: 1\n- Tool calls: 0\n- Estimated LLM cost: $0.0000"
+
+            def list_dynamic_skill_states(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "tool_name": "demo_tool",
+                        "folder": "demo",
+                        "display_name": "Demo Skill",
+                        "status": "enabled",
+                        "permissions": "safe-read",
+                        "runtime_mode": "python",
+                    }
+                ]
+
+            def list_plugins(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "name": "demo-plugin",
+                        "source_type": "local",
+                        "installed_at": "now",
+                        "pin_ref": "[none]",
+                        "enabled": "yes",
+                        "skills": "demo",
+                    }
+                ]
+
+            def list_session_jobs(self, user_id: str, limit: int = 10) -> list[dict[str, str]]:
+                return self._jobs.get(str(user_id), [])[:limit]
+
+            def resume_session_job(self, job_id: str) -> tuple[bool, str]:
+                return True, f"Resumed job `{job_id}`."
+
+        class FakeServiceManager:
+            def status(self) -> tuple[bool, str]:
+                return True, "demo-service up"
+
+        app = create_dashboard_app(
+            local_settings,
+            orchestrator=FakeOrchestrator(manager),
+            service_manager=FakeServiceManager(),
+        )
         client = TestClient(app)
         health = client.get("/api/health")
+        sessions = client.get("/api/chat/sessions")
+        if sessions.status_code != 200:
+            return False, "Dashboard session listing endpoint failed."
+        sessions_payload = sessions.json()
+        session_id = str(sessions_payload.get("default_session_id", "")).strip()
+        if not session_id:
+            return False, "Dashboard did not create a default session."
+        created = client.post("/api/chat/sessions", json={"title": "Parity Session"})
+        if created.status_code != 200:
+            return False, "Dashboard session creation endpoint failed."
+        created_session_id = str(created.json().get("session", {}).get("id", "")).strip()
+        if not created_session_id:
+            return False, "Created dashboard session is missing an id."
+        transcript = client.post(
+            f"/api/chat/sessions/{created_session_id}/messages",
+            json={"text": "hello from parity"},
+        )
+        provider = client.post(
+            f"/api/chat/sessions/{created_session_id}/provider",
+            json={"provider": "openai"},
+        )
+        model = client.post(
+            f"/api/chat/sessions/{created_session_id}/model",
+            json={"model": "gpt-demo"},
+        )
         pending = client.get("/api/approvals/pending")
         approve = client.post(f"/api/approvals/{record.id}/approve", json={"actor": "parity-suite"})
         record2 = manager.request_approval(
@@ -323,15 +466,26 @@ def run_parity_check(settings: Settings, strict: bool = False) -> tuple[int, lis
             f"/api/approvals/{record2.id}/deny",
             json={"actor": "parity-suite", "reason": "policy block"},
         )
+        skills = client.get("/api/skills")
+        plugins = client.get("/api/plugins")
+        config = client.get("/api/config")
         if health.status_code != 200:
             return False, "Dashboard health endpoint failed."
+        if transcript.status_code != 200 or len(transcript.json().get("messages", [])) < 2:
+            return False, "Dashboard direct chat endpoint failed."
+        if provider.status_code != 200 or not bool(provider.json().get("ok")):
+            return False, "Dashboard provider update endpoint failed."
+        if model.status_code != 200 or not bool(model.json().get("ok")):
+            return False, "Dashboard model update endpoint failed."
         if pending.status_code != 200:
             return False, "Dashboard pending approvals endpoint failed."
         if approve.status_code != 200 or not bool(approve.json().get("ok")):
             return False, "Dashboard approve action failed."
         if deny.status_code != 200 or not bool(deny.json().get("ok")):
             return False, "Dashboard deny action failed."
-        return True, "Dashboard API approve/deny flow passed."
+        if skills.status_code != 200 or plugins.status_code != 200 or config.status_code != 200:
+            return False, "Dashboard support endpoints failed."
+        return True, "Dashboard API control-panel flow passed."
 
     run_check("install_scripts", True, check_install_scripts)
     run_check("workspace_scaffold", True, check_workspace_scaffold)

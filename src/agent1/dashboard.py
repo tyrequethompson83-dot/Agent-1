@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
+from pathlib import Path
 
 import uvicorn
-from fastapi import Body, FastAPI, Query
-from pydantic import BaseModel
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
-from agent1.approvals_bridge import ExternalApprovalsBridge
+from agent1.agents.orchestrator import AgentOrchestrator
 from agent1.config import Settings
+from agent1.dashboard_state import DashboardSession, DashboardSessionStore
+from agent1.dashboard_ui import dashboard_html
 from agent1.diagnostics import Doctor
-from agent1.tools.approval import ApprovalManager
+from agent1.service_manager import ServiceManager
 
 
 class ApprovalActionRequest(BaseModel):
@@ -18,116 +22,273 @@ class ApprovalActionRequest(BaseModel):
     reason: str = ""
 
 
-def _dashboard_html() -> str:
-    return """<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>Agent 1 Dashboard</title>
-    <style>
-      :root { --bg:#0b1220; --card:#121a2b; --ink:#e6edf7; --muted:#9fb0cc; --accent:#39a0ff; --ok:#19c37d; --fail:#ff5d5d; }
-      body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background:linear-gradient(180deg,#0b1220,#0f1728); color:var(--ink); }
-      .wrap { max-width: 1000px; margin: 24px auto; padding: 0 16px; }
-      .row { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-      .card { background: var(--card); border:1px solid #223252; border-radius: 12px; padding: 14px; }
-      h1 { margin: 0 0 16px; font-size: 24px; }
-      h2 { margin: 0 0 8px; font-size: 16px; color: var(--muted); }
-      pre { white-space: pre-wrap; font-size: 12px; line-height: 1.5; color: #d7e3f7; background:#0d1526; border-radius:8px; padding:10px; border:1px solid #223252; }
-      button { border:0; background:var(--accent); color:white; padding:8px 12px; border-radius:8px; cursor:pointer; font-weight:600; }
-      button.deny { background:#a32121; }
-      .pill { display:inline-block; font-size:12px; border-radius:999px; padding:2px 8px; margin-left:6px; }
-      .ok { background: #103924; color: #8df0bf; border:1px solid #1f7348; }
-      .fail { background:#3c1212; color:#ff9b9b; border:1px solid #8a2323; }
-      .approval { border:1px solid #243557; border-radius:10px; padding:10px; margin-bottom:10px; background:#0d1526; }
-      .meta { color: var(--muted); font-size:12px; margin-bottom:8px; }
-      .actions { display:flex; gap:8px; margin-top:8px; }
-      @media (max-width: 860px) { .row { grid-template-columns: 1fr; } }
-    </style>
-  </head>
-  <body>
-    <div class="wrap">
-      <h1>Agent 1 Dashboard <span id="health" class="pill">checking</span></h1>
-      <div class="row">
-        <div class="card">
-          <h2>Doctor</h2>
-          <p><button onclick="refreshDoctor()">Refresh Doctor</button></p>
-          <pre id="doctor">Loading...</pre>
-        </div>
-        <div class="card">
-          <h2>Pending Approvals</h2>
-          <p><button onclick="refreshApprovals()">Refresh Approvals</button></p>
-          <div id="approvals">Loading...</div>
-        </div>
-      </div>
-    </div>
-    <script>
-      async function loadHealth() {
-        const res = await fetch('/api/health');
-        const data = await res.json();
-        const el = document.getElementById('health');
-        if (data.ok) { el.className = 'pill ok'; el.textContent = 'healthy'; }
-        else { el.className = 'pill fail'; el.textContent = 'degraded'; }
-      }
-      async function refreshDoctor() {
-        const res = await fetch('/api/doctor');
-        const data = await res.json();
-        document.getElementById('doctor').textContent = data.report || '';
-      }
-      async function refreshApprovals() {
-        const res = await fetch('/api/approvals/pending?limit=30');
-        const rows = await res.json();
-        const root = document.getElementById('approvals');
-        if (!rows.length) { root.innerHTML = '<pre>No pending approvals.</pre>'; return; }
-        root.innerHTML = rows.map(r => `
-          <div class="approval">
-            <div class="meta">${r.id} | ${r.action_type} | ${r.requested_by}</div>
-            <pre>${r.reason || ''}</pre>
-            <div class="actions">
-              <button onclick="approve('${r.id}')">Approve</button>
-              <button class="deny" onclick="denyApproval('${r.id}')">Deny</button>
-            </div>
-          </div>
-        `).join('');
-      }
-      async function approve(id) {
-        const res = await fetch(`/api/approvals/${id}/approve`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ actor: 'dashboard-ui' }) });
-        const data = await res.json();
-        alert(data.message || (data.ok ? 'Approved' : 'Failed'));
-        refreshApprovals();
-      }
-      async function denyApproval(id) {
-        const reason = prompt('Optional deny reason:', '') || '';
-        const res = await fetch(`/api/approvals/${id}/deny`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ actor: 'dashboard-ui', reason }) });
-        const data = await res.json();
-        alert(data.message || (data.ok ? 'Denied' : 'Failed'));
-        refreshApprovals();
-      }
-      loadHealth(); refreshDoctor(); refreshApprovals();
-    </script>
-  </body>
-</html>"""
+class CreateSessionRequest(BaseModel):
+    title: str = ""
 
 
-def create_dashboard_app(settings: Settings) -> FastAPI:
-    app = FastAPI(title="Agent 1 Dashboard", version="0.1.0")
-    approvals = ApprovalManager(
-        store_path=settings.approval_store_path,
-        external_bridge=ExternalApprovalsBridge(settings),
-    )
+class ChatMessageRequest(BaseModel):
+    text: str = ""
+
+
+class ProviderUpdateRequest(BaseModel):
+    provider: str = ""
+
+
+class ModelUpdateRequest(BaseModel):
+    model: str = ""
+    clear: bool = False
+
+
+def _load_json(path: Path, fallback: dict | list) -> dict | list:
+    if not path.exists():
+        return fallback
+    raw = path.read_text(encoding="utf-8", errors="ignore").strip()
+    if not raw:
+        return fallback
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return fallback
+    return parsed if isinstance(parsed, type(fallback)) else fallback
+
+
+def _known_dashboard_user_ids(settings: Settings) -> list[str]:
+    payload = _load_json(settings.session_jobs_path, {"jobs": {}})
+    rows = payload.get("jobs", {}) if isinstance(payload, dict) else {}
+    out: set[str] = set()
+    if isinstance(rows, dict):
+        for row in rows.values():
+            if not isinstance(row, dict):
+                continue
+            user_id = str(row.get("user_id", "")).strip()
+            if user_id.startswith("dashboard:"):
+                out.add(user_id)
+    return sorted(out)
+
+
+def _doctor_snapshot(settings: Settings) -> dict[str, object]:
+    rows = Doctor(settings).run()
+    failed = len([row for row in rows if not row.ok])
+    return {
+        "ok": failed == 0,
+        "passed": len(rows) - failed,
+        "total": len(rows),
+        "rows": [asdict(row) for row in rows],
+        "report": Doctor(settings).report_text(),
+    }
+
+
+def _serialize_session(session: DashboardSession) -> dict[str, object]:
+    return asdict(session)
+
+
+def _session_runtime(orchestrator: AgentOrchestrator, session: DashboardSession) -> dict[str, object]:
+    provider_status = orchestrator.get_provider_status(session.user_id)
+    policy_status = orchestrator.get_tool_policy_status(session.user_id)
+    return {
+        "user_id": session.user_id,
+        "provider_status": provider_status,
+        "available_providers": orchestrator.list_available_providers(),
+        "policy_status": policy_status,
+        "available_tool_profiles": orchestrator.list_tool_profiles(),
+        "usage_report": orchestrator.usage_report(session.user_id),
+    }
+
+
+def _config_summary(settings: Settings, orchestrator: AgentOrchestrator) -> dict[str, object]:
+    return {
+        "app_name": settings.app_name,
+        "chat_adapter": settings.chat_adapter,
+        "llm": {
+            "default_provider": settings.llm_default_provider,
+            "default_model": settings.llm_model,
+            "base_url": settings.llm_base_url,
+            "available_providers": orchestrator.list_available_providers(),
+        },
+        "paths": {
+            "data_dir": str(settings.data_dir),
+            "workspace_dir": str(settings.workspace_profile_path),
+            "logs_dir": str(settings.app_log_path.parent),
+            "approval_store": str(settings.approval_store_path),
+            "session_jobs": str(settings.session_jobs_path),
+            "session_history": str(settings.session_history_path),
+            "plugins_registry": str(settings.plugins_registry_path),
+        },
+        "integrations": {
+            "telegram": bool(settings.telegram_bot_token.strip()),
+            "discord": bool(settings.discord_bot_token.strip()),
+            "slack": bool(settings.slack_bot_token.strip()),
+            "whatsapp": bool(settings.whatsapp_access_token.strip()),
+            "bridge": bool(settings.bridge_auth_token.strip()),
+            "email": bool(settings.email_enabled),
+            "calendar": bool(settings.calendar_enabled),
+        },
+        "session_engine": {
+            "max_concurrency": settings.session_max_concurrency,
+        },
+    }
+
+
+def create_dashboard_app(
+    settings: Settings,
+    *,
+    orchestrator: AgentOrchestrator | None = None,
+    service_manager: ServiceManager | None = None,
+    session_store: DashboardSessionStore | None = None,
+) -> FastAPI:
+    settings.ensure_paths()
+    orchestrator = orchestrator or AgentOrchestrator(settings)
+    approvals = orchestrator.approvals
+    session_store = session_store or DashboardSessionStore(settings)
+    service_manager = service_manager or ServiceManager()
+    session_store.ensure_default_session(_known_dashboard_user_ids(settings))
+
+    app = FastAPI(title="Agent 1 Dashboard", version="0.2.0")
+
+    def require_session(session_id: str) -> DashboardSession:
+        session = session_store.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Unknown dashboard session `{session_id}`.")
+        return session
+
+    def session_payload(session: DashboardSession, *, msg_limit: int = 200, job_limit: int = 25) -> dict[str, object]:
+        fresh = session_store.get_session(session.id) or session
+        return {
+            "session": _serialize_session(fresh),
+            "messages": [asdict(row) for row in session_store.list_messages(fresh.id, limit=msg_limit)],
+            "jobs": orchestrator.list_session_jobs(fresh.user_id, limit=job_limit),
+            "runtime": _session_runtime(orchestrator, fresh),
+        }
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard() -> str:
-        return _dashboard_html()
+        return dashboard_html()
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        return {"ok": True, "app": settings.app_name}
+        snapshot = _doctor_snapshot(settings)
+        default_session = session_store.ensure_default_session(_known_dashboard_user_ids(settings))
+        runtime = _session_runtime(orchestrator, default_session)
+        return {
+            "ok": bool(snapshot["ok"]),
+            "app": settings.app_name,
+            "chat_adapter": settings.chat_adapter,
+            "default_session_id": default_session.id,
+            "provider": runtime["provider_status"]["provider"],
+            "model": runtime["provider_status"]["model"],
+        }
 
     @app.get("/api/doctor")
-    def doctor_report() -> dict[str, str]:
-        report = Doctor(settings).report_text()
-        return {"report": report}
+    def doctor_report() -> dict[str, object]:
+        return _doctor_snapshot(settings)
+
+    @app.get("/api/overview")
+    def overview() -> dict[str, object]:
+        snapshot = _doctor_snapshot(settings)
+        sessions = session_store.list_sessions(limit=12)
+        active = sessions[0] if sessions else session_store.ensure_default_session(_known_dashboard_user_ids(settings))
+        return {
+            "health": {"ok": bool(snapshot["ok"]), "passed": snapshot["passed"], "total": snapshot["total"]},
+            "active_session_id": active.id,
+            "pending_approvals_count": len(approvals.list_pending(limit=200)),
+            "session_count": len(session_store.list_sessions(limit=500)),
+            "workspace_dir": str(settings.workspace_profile_path),
+            "data_dir": str(settings.data_dir),
+            "provider_status": orchestrator.get_provider_status(active.user_id),
+            "usage_report": orchestrator.usage_report(active.user_id),
+            "recent_sessions": [_serialize_session(row) for row in sessions],
+            "recent_jobs": orchestrator.list_session_jobs(active.user_id, limit=8),
+            "doctor_report": snapshot["report"],
+        }
+
+    @app.get("/api/service")
+    def service_status() -> dict[str, object]:
+        ok, output = service_manager.status()
+        return {"ok": ok, "output": output}
+
+    @app.get("/api/chat/sessions")
+    def list_sessions(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, object]:
+        default_session = session_store.ensure_default_session(_known_dashboard_user_ids(settings))
+        sessions = session_store.list_sessions(limit=limit)
+        return {
+            "items": [_serialize_session(row) for row in sessions],
+            "default_session_id": default_session.id,
+        }
+
+    @app.post("/api/chat/sessions")
+    def create_session(
+        payload: CreateSessionRequest = Body(default_factory=CreateSessionRequest),
+    ) -> dict[str, object]:
+        session = session_store.create_session(title=payload.title)
+        return {
+            "session": _serialize_session(session),
+            "items": [_serialize_session(row) for row in session_store.list_sessions(limit=100)],
+        }
+
+    @app.get("/api/chat/sessions/{session_id}")
+    def get_session(session_id: str) -> dict[str, object]:
+        return session_payload(require_session(session_id))
+
+    @app.get("/api/chat/sessions/{session_id}/messages")
+    def get_session_messages(
+        session_id: str,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> list[dict[str, object]]:
+        session = require_session(session_id)
+        return [asdict(row) for row in session_store.list_messages(session.id, limit=limit)]
+
+    @app.get("/api/chat/sessions/{session_id}/runtime")
+    def get_session_runtime(session_id: str) -> dict[str, object]:
+        return _session_runtime(orchestrator, require_session(session_id))
+
+    @app.get("/api/chat/sessions/{session_id}/jobs")
+    def get_session_jobs(
+        session_id: str,
+        limit: int = Query(default=25, ge=1, le=200),
+    ) -> list[dict[str, str]]:
+        session = require_session(session_id)
+        return orchestrator.list_session_jobs(session.user_id, limit=limit)
+
+    @app.post("/api/chat/sessions/{session_id}/messages")
+    def post_session_message(
+        session_id: str,
+        payload: ChatMessageRequest = Body(default_factory=ChatMessageRequest),
+    ) -> dict[str, object]:
+        session = require_session(session_id)
+        text = payload.text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Message text cannot be empty.")
+
+        session_store.append_message(session.id, "user", text)
+        try:
+            reply = orchestrator.process_message(session.user_id, text)
+            kind = "message"
+        except Exception as exc:
+            reply = f"Specialist error: {exc}"
+            kind = "error"
+        session_store.append_message(session.id, "assistant", reply, kind=kind)
+        return session_payload(session)
+
+    @app.post("/api/chat/sessions/{session_id}/provider")
+    def update_session_provider(
+        session_id: str,
+        payload: ProviderUpdateRequest = Body(default_factory=ProviderUpdateRequest),
+    ) -> dict[str, object]:
+        session = require_session(session_id)
+        ok, message = orchestrator.set_provider_for_user(session.user_id, payload.provider)
+        return {"ok": ok, "message": message, "runtime": _session_runtime(orchestrator, session)}
+
+    @app.post("/api/chat/sessions/{session_id}/model")
+    def update_session_model(
+        session_id: str,
+        payload: ModelUpdateRequest = Body(default_factory=ModelUpdateRequest),
+    ) -> dict[str, object]:
+        session = require_session(session_id)
+        if payload.clear or not payload.model.strip():
+            ok, message = orchestrator.clear_model_override_for_user(session.user_id)
+        else:
+            ok, message = orchestrator.set_model_for_user(session.user_id, payload.model)
+        return {"ok": ok, "message": message, "runtime": _session_runtime(orchestrator, session)}
 
     @app.get("/api/approvals/pending")
     def pending_approvals(limit: int = Query(default=30, ge=1, le=200)) -> list[dict[str, object]]:
@@ -153,6 +314,23 @@ def create_dashboard_app(settings: Settings) -> FastAPI:
             reason=payload.reason,
         )
         return {"ok": ok, "message": message, "approval_id": approval_id}
+
+    @app.post("/api/jobs/{job_id}/resume")
+    def resume_job(job_id: str) -> dict[str, object]:
+        ok, message = orchestrator.resume_session_job(job_id)
+        return {"ok": ok, "message": message, "job_id": job_id}
+
+    @app.get("/api/skills")
+    def skills() -> list[dict[str, str]]:
+        return orchestrator.list_dynamic_skill_states()
+
+    @app.get("/api/plugins")
+    def plugins() -> list[dict[str, str]]:
+        return orchestrator.list_plugins()
+
+    @app.get("/api/config")
+    def config_summary() -> dict[str, object]:
+        return _config_summary(settings, orchestrator)
 
     return app
 
